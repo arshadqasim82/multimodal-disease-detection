@@ -1,0 +1,21 @@
+seed: 42
+device: "cuda"
+
+data:
+  image_root: "data/images"
+  text_path: "data/text.csv"
+  batch_size: 16
+  num_workers: 2
+
+model:
+  image_encoder: "densenet121"
+  text_encoder: "emilyalsentzer/Bio_ClinicalBERT"
+  fusion: "attention" # options: concat, attention
+  hidden_dim: 256
+  num_classes: 2
+
+train:
+  lr: 2e-4
+  epochs: 1
+  weight_decay: 0.01
+  max_length: 128
