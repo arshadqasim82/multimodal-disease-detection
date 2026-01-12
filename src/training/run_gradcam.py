@@ -2,39 +2,52 @@ from src.explainability.gradcam import GradCAM
 from src.models.image_encoder import DenseNetImageEncoder
 from src.datasets.image_dataset import ImageDatasetConfig, ImageFolderBinaryDataset
 import matplotlib.pyplot as plt
+import torch.nn as nn
 import torch
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
+def disable_inplace_relu(module: nn.Module):
+    """
+    Grad-CAM with backward hooks can fail if the model uses inplace ReLUs.
+    This walks the model and sets inplace=False for all ReLU modules.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.ReLU):
+            m.inplace = False
+
+
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     ds = ImageFolderBinaryDataset(ImageDatasetConfig(root_dir="data/images"))
-    loader_idx = [0, 10, 20, 30, 40, 50]  # sample indices; we’ll refine later
+    sample_indices = [0, 10, 20, 30, 40, 50]
 
     model = DenseNetImageEncoder(num_classes=2).to(device)
     model.load_state_dict(torch.load(
         "reports/image_model_best.pt", map_location=device))
     model.eval()
 
-    # target layer: DenseNet last conv block lives at model.backbone.features
+    # ✅ critical fix
+    disable_inplace_relu(model)
+
+    # target layer: DenseNet feature extractor output (last block)
     target_layer = model.backbone.features[-1]
     cam = GradCAM(model, target_layer)
 
     out_dir = Path("reports/figures/gradcam")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for i in loader_idx:
+    for i in sample_indices:
         x, y, path = ds[i]
         x = x.unsqueeze(0).to(device)
-        heat, logits = cam(x)
 
+        heat, logits = cam(x)
         prob = torch.softmax(logits, dim=1)[0, 1].item()
         pred = int(torch.argmax(logits, dim=1).item())
 
-        # Plot: original (grayscale) + CAM overlay
         img = x[0].detach().cpu().permute(1, 2, 0).numpy()
         h = heat[0, 0].cpu().numpy()
 
