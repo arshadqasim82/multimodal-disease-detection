@@ -1,9 +1,16 @@
+# src/training/train_fusion.py
 from src.models.fusion import ConcatFusion, AttentionFusion
 from src.models.feature_extractors import DenseNetFeatureExtractor, BertCLSFeatureExtractor
 from src.datasets.multimodal_dataset import MultimodalDatasetConfig, PairedIndexMultimodalDataset
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
-from torch.utils.data import DataLoader, random_split
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    roc_auc_score,
+    f1_score,
+    confusion_matrix,
+    average_precision_score,
+)
+from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
 import torch
 import numpy as np
@@ -20,7 +27,23 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
-def evaluate_concat(img_enc, txt_enc, fusion, loader, device):
+def best_f1_threshold(labels, probs):
+    """
+    Choose threshold that maximizes F1 on validation set.
+    """
+    labels = np.asarray(labels)
+    probs = np.asarray(probs)
+    best_t, best_f1 = 0.5, -1.0
+    for t in np.linspace(0.05, 0.95, 19):
+        preds = (probs >= t).astype(int)
+        f1 = f1_score(labels, preds, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = float(f1)
+            best_t = float(t)
+    return best_t, best_f1
+
+
+def collect_probs_concat(img_enc, txt_enc, fusion, loader, device):
     img_enc.eval()
     txt_enc.eval()
     fusion.eval()
@@ -39,15 +62,10 @@ def evaluate_concat(img_enc, txt_enc, fusion, loader, device):
             p = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
             probs.extend(p)
             labels.extend(y)
-
-    auc = roc_auc_score(labels, probs)
-    preds = [1 if p >= 0.5 else 0 for p in probs]
-    f1 = f1_score(labels, preds)
-    cm = confusion_matrix(labels, preds)
-    return auc, f1, cm
+    return np.asarray(labels), np.asarray(probs)
 
 
-def evaluate_attn(img_enc, txt_enc, fusion, loader, device):
+def collect_probs_attn(img_enc, txt_enc, fusion, loader, device):
     img_enc.eval()
     txt_enc.eval()
     fusion.eval()
@@ -69,12 +87,36 @@ def evaluate_attn(img_enc, txt_enc, fusion, loader, device):
             probs.extend(p)
             labels.extend(y)
 
-    auc = roc_auc_score(labels, probs)
-    preds = [1 if p >= 0.5 else 0 for p in probs]
-    f1 = f1_score(labels, preds)
-    cm = confusion_matrix(labels, preds)
     w_mean = torch.cat(all_w, dim=0).mean(dim=0).tolist()  # [w_img, w_txt]
-    return auc, f1, cm, w_mean
+    return np.asarray(labels), np.asarray(probs), w_mean
+
+
+def metrics_from_probs(labels, probs, threshold=0.5):
+    auc = roc_auc_score(labels, probs)
+    prauc = average_precision_score(labels, probs)
+    preds = (np.asarray(probs) >= threshold).astype(int)
+    f1 = f1_score(labels, preds, zero_division=0)
+    cm = confusion_matrix(labels, preds)
+    return auc, prauc, f1, cm
+
+
+def stratified_split_indices(ds, seed=42):
+    """
+    Stratify by image label (the target label of the multimodal dataset).
+    """
+    labels = []
+    for i in range(len(ds)):
+        labels.append(int(ds[i]["label"]))
+    labels = np.asarray(labels)
+
+    idx = np.arange(len(ds))
+    train_idx, temp_idx, y_train, y_temp = train_test_split(
+        idx, labels, test_size=0.30, random_state=seed, stratify=labels
+    )
+    val_idx, test_idx, y_val, y_test = train_test_split(
+        temp_idx, y_temp, test_size=0.50, random_state=seed, stratify=y_temp
+    )
+    return train_idx, val_idx, test_idx
 
 
 def run_experiment(fusion_type: str):
@@ -90,13 +132,10 @@ def run_experiment(fusion_type: str):
     )
     ds = PairedIndexMultimodalDataset(cfg)
 
-    n_total = len(ds)
-    n_train = int(0.70 * n_total)
-    n_val = int(0.15 * n_total)
-    n_test = n_total - n_train - n_val
-    g = torch.Generator().manual_seed(42)
-    train_ds, val_ds, test_ds = random_split(
-        ds, [n_train, n_val, n_test], generator=g)
+    train_idx, val_idx, test_idx = stratified_split_indices(ds, seed=42)
+    train_ds = Subset(ds, train_idx)
+    val_ds = Subset(ds, val_idx)
+    test_ds = Subset(ds, test_idx)
 
     train_loader = DataLoader(train_ds, batch_size=8,
                               shuffle=True, num_workers=2)
@@ -131,8 +170,8 @@ def run_experiment(fusion_type: str):
     criterion = nn.CrossEntropyLoss()
 
     best_val_auc = -1.0
-    Path("reports").mkdir(exist_ok=True)
     best_path = f"reports/fusion_{fusion_type}_best.pt"
+    Path("reports").mkdir(exist_ok=True)
 
     for epoch in range(10):
         fusion.train()
@@ -156,49 +195,78 @@ def run_experiment(fusion_type: str):
             loss.backward()
             optimizer.step()
 
-        # Validation
+        # Validation metrics + threshold selection
         if fusion_type == "concat":
-            val_auc, val_f1, val_cm = evaluate_concat(
+            y_val, p_val = collect_probs_concat(
                 img_enc, txt_enc, fusion, val_loader, device)
-            print(
-                f"{fusion_type} | VAL AUC: {val_auc:.4f} | VAL F1: {val_f1:.4f}\nVAL CM:\n{val_cm}")
+            w_mean = None
         else:
-            val_auc, val_f1, val_cm, w_mean = evaluate_attn(
+            y_val, p_val, w_mean = collect_probs_attn(
                 img_enc, txt_enc, fusion, val_loader, device)
-            print(
-                f"{fusion_type} | VAL AUC: {val_auc:.4f} | VAL F1: {val_f1:.4f} | mean[w_img,w_txt]={w_mean}\nVAL CM:\n{val_cm}")
+
+        val_auc, val_prauc, _, _ = metrics_from_probs(
+            y_val, p_val, threshold=0.5)
+        t_best, val_f1_best = best_f1_threshold(y_val, p_val)
+        _, _, _, val_cm_best = metrics_from_probs(
+            y_val, p_val, threshold=t_best)
+
+        if w_mean is None:
+            print(f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
+                  f"best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\nVAL CM@best_t:\n{val_cm_best}")
+        else:
+            print(f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
+                  f"mean[w_img,w_txt]={w_mean} | best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\n"
+                  f"VAL CM@best_t:\n{val_cm_best}")
 
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             torch.save(fusion.state_dict(), best_path)
             print("✅ Saved new best fusion model")
 
-    # Test
+    # Final test evaluation using best checkpoint and best threshold from VAL of that checkpoint
     fusion.load_state_dict(torch.load(best_path, map_location=device))
 
     if fusion_type == "concat":
-        test_auc, test_f1, test_cm = evaluate_concat(
+        y_val, p_val = collect_probs_concat(
+            img_enc, txt_enc, fusion, val_loader, device)
+        y_test, p_test = collect_probs_concat(
             img_enc, txt_enc, fusion, test_loader, device)
-        print("\n=== FINAL TEST RESULTS (concat best) ===")
-        print(
-            f"TEST AUC: {test_auc:.4f} | TEST F1: {test_f1:.4f}\nTEST CM:\n{test_cm}")
-        extra = ""
+        w_mean = None
     else:
-        test_auc, test_f1, test_cm, w_mean = evaluate_attn(
+        y_val, p_val, w_mean = collect_probs_attn(
+            img_enc, txt_enc, fusion, val_loader, device)
+        y_test, p_test, w_mean_test = collect_probs_attn(
             img_enc, txt_enc, fusion, test_loader, device)
-        print("\n=== FINAL TEST RESULTS (attention best) ===")
-        print(
-            f"TEST AUC: {test_auc:.4f} | TEST F1: {test_f1:.4f} | mean[w_img,w_txt]={w_mean}\nTEST CM:\n{test_cm}")
-        extra = f"MEAN_WEIGHTS={w_mean}\n"
+        # report test mean weights too
+        w_mean = w_mean_test
 
-    with open(f"reports/fusion_{fusion_type}_metrics.txt", "w") as f:
-        f.write(f"VAL_BEST_AUC={best_val_auc:.4f}\n")
-        f.write(f"TEST_AUC={test_auc:.4f}\n")
+    t_best, _ = best_f1_threshold(y_val, p_val)
+
+    test_auc, test_prauc, test_f1, test_cm = metrics_from_probs(
+        y_test, p_test, threshold=t_best)
+
+    print("\n=== FINAL TEST RESULTS (best checkpoint, threshold tuned on VAL) ===")
+    if w_mean is None:
+        print(
+            f"TEST ROC-AUC: {test_auc:.4f} | TEST PR-AUC: {test_prauc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f}")
+    else:
+        print(f"TEST ROC-AUC: {test_auc:.4f} | TEST PR-AUC: {test_prauc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f} "
+              f"| mean[w_img,w_txt]={w_mean}")
+    print("TEST CM:\n", test_cm)
+
+    # Save metrics
+    metrics_path = f"reports/fusion_{fusion_type}_metrics.txt"
+    with open(metrics_path, "w") as f:
+        f.write(f"VAL_BEST_ROC_AUC={best_val_auc:.4f}\n")
+        f.write(f"BEST_THRESHOLD={t_best:.2f}\n")
+        f.write(f"TEST_ROC_AUC={test_auc:.4f}\n")
+        f.write(f"TEST_PR_AUC={test_prauc:.4f}\n")
         f.write(f"TEST_F1={test_f1:.4f}\n")
         f.write(f"TEST_CM=\n{test_cm}\n")
-        f.write(extra)
+        if w_mean is not None:
+            f.write(f"MEAN_WEIGHTS={w_mean}\n")
 
-    print(f"Saved metrics to reports/fusion_{fusion_type}_metrics.txt")
+    print(f"Saved metrics to {metrics_path}")
 
 
 def main():
