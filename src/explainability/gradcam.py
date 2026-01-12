@@ -3,23 +3,33 @@ import torch.nn.functional as F
 
 
 class GradCAM:
+    """
+    DenseNet-safe Grad-CAM:
+    - Forward hook captures activations.
+    - We attach a gradient hook directly on the activation tensor (no backward module hooks),
+      avoiding inplace/view issues.
+    """
+
     def __init__(self, model, target_layer):
         self.model = model
         self.target_layer = target_layer
-        self.gradients = None
         self.activations = None
+        self.gradients = None
 
-        target_layer.register_forward_hook(self._forward_hook)
-        target_layer.register_full_backward_hook(self._backward_hook)
+        self.target_layer.register_forward_hook(self._forward_hook)
 
     def _forward_hook(self, module, inp, out):
         self.activations = out
 
-    def _backward_hook(self, module, grad_in, grad_out):
-        self.gradients = grad_out[0]
+        # Capture gradients w.r.t. activations
+        def _store_grad(grad):
+            self.gradients = grad
+
+        out.register_hook(_store_grad)
 
     def __call__(self, x, class_idx=None):
-        self.model.zero_grad()
+        self.model.zero_grad(set_to_none=True)
+
         logits = self.model(x)
 
         if class_idx is None:
@@ -28,12 +38,12 @@ class GradCAM:
         loss = logits[torch.arange(logits.size(0)), class_idx].sum()
         loss.backward()
 
-        # Global average pool the gradients
+        # Global average pool gradients -> weights
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         cam = (weights * self.activations).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
 
-        # Normalize CAM
+        # Normalize CAM per-batch tensor
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-8)
 
