@@ -1,3 +1,26 @@
+"""
+Purpose
+-------
+Grad-CAM implementation for CNN explainability.
+
+Method
+------
+- Captures activations from a target convolutional layer
+- Captures gradients w.r.t. activations via tensor hook (DenseNet-safe)
+- Produces a normalized heatmap indicating influential spatial regions
+
+Outputs
+-------
+Returns:
+- cam: [B, 1, H, W] normalized heatmap
+- logits: model logits (for predicted probabilities)
+
+Notes
+-----
+This implementation avoids backward module hooks to prevent inplace/view errors
+commonly seen with DenseNet in torchvision.
+"""
+
 import torch
 import torch.nn.functional as F
 

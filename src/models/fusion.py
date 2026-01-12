@@ -1,3 +1,22 @@
+"""
+Purpose
+-------
+Implements multimodal fusion strategies to combine image and text features.
+
+Fusion Methods
+--------------
+1) ConcatFusion:
+   - Concatenates feature vectors then applies an MLP classifier.
+
+2) AttentionFusion:
+   - Learns modality weights over {image, text} and produces a weighted fused representation.
+
+Outputs
+-------
+- ConcatFusion returns logits
+- AttentionFusion returns (logits, weights) where weights = [w_img, w_txt]
+"""
+
 import torch
 import torch.nn as nn
 

@@ -1,3 +1,20 @@
+"""
+Purpose
+-------
+Text classification model using a ClinicalBERT-style transformer encoder.
+
+Architecture
+-----------
+- Transformer encoder (Bio_ClinicalBERT)
+- [CLS] token embedding is used as pooled representation
+- Linear classifier head -> 2 classes
+
+Notes
+-----
+- Trained on a public biomedical QA dataset as a proxy text modality.
+- Designed to be compatible with EHR-style notes with minimal changes.
+"""
+
 import torch.nn as nn
 from transformers import AutoModel
 

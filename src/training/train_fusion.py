@@ -1,3 +1,20 @@
+"""
+Trains multimodal fusion models (concat and attention) using frozen encoders.
+
+Outputs
+-------
+- reports/fusion_concat_best.pt
+- reports/fusion_attention_best.pt
+- reports/fusion_*_metrics.txt
+
+Evaluation
+----------
+- Stratified split by image labels
+- ROC-AUC, PR-AUC
+- F1 at validation-tuned threshold
+- Confusion matrices
+"""
+
 # src/training/train_fusion.py
 from src.models.fusion import ConcatFusion, AttentionFusion
 from src.models.feature_extractors import DenseNetFeatureExtractor, BertCLSFeatureExtractor

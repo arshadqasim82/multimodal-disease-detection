@@ -1,3 +1,17 @@
+"""
+Trains an image-only DenseNet baseline on NIH Chest X-ray subset.
+
+Outputs
+-------
+- reports/image_model_best.pt
+- reports/image_metrics.txt
+
+Evaluation
+----------
+- Stratified train/val/test split
+- ROC-AUC and F1 with confusion matrix
+"""
+
 from src.models.image_encoder import DenseNetImageEncoder
 from src.datasets.image_dataset import ImageDatasetConfig, ImageFolderBinaryDataset
 from tqdm import tqdm

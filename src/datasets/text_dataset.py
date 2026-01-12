@@ -1,3 +1,27 @@
+"""
+Purpose
+-------
+Loads biomedical/clinical-style text samples for binary classification.
+
+Dataset Format
+-------------
+Expects a CSV with columns:
+- text: str
+- label: int (0/1)
+
+Outputs
+-------
+__getitem__ returns a dict containing:
+- input_ids: torch.LongTensor [max_length]
+- attention_mask: torch.LongTensor [max_length]
+- label: torch.LongTensor scalar
+
+Notes
+-----
+- Tokenization uses a transformer tokenizer (e.g., Bio_ClinicalBERT).
+- This project uses PubMedQA-derived text as a proxy modality under access constraints.
+"""
+
 from dataclasses import dataclass
 from typing import Dict
 

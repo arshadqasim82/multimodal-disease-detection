@@ -1,3 +1,28 @@
+"""
+Purpose
+-------
+Loads NIH Chest X-ray images for binary classification.
+
+Dataset Format
+-------------
+Expects a folder structure:
+    data/images/
+        class0/   # negative class (No Finding)
+        class1/   # positive class (Effusion)
+
+Outputs
+-------
+__getitem__ returns:
+- x: torch.FloatTensor [3, H, W]
+- y: torch.LongTensor scalar (0 or 1)
+- path: str (filename for traceability)
+
+Notes
+-----
+- Images are converted to grayscale then expanded to 3 channels for CNN backbones.
+- Resizing is applied for fixed-size batching.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List

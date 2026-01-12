@@ -1,3 +1,27 @@
+"""
+Purpose
+-------
+Defines a multimodal dataset wrapper that returns aligned image + text inputs.
+
+Pairing Strategy
+----------------
+Pairs image samples and text samples by index (engineering demonstration).
+This is not patient-level fusion because the datasets are not linked.
+
+Labeling
+--------
+The multimodal target label is taken from the IMAGE task
+(Effusion vs No Finding), to support consistent evaluation.
+
+Outputs
+-------
+Returns dict:
+- image: tensor [3, H, W]
+- input_ids: tensor [L]
+- attention_mask: tensor [L]
+- label: scalar (0/1)
+"""
+
 from dataclasses import dataclass
 from typing import Dict
 

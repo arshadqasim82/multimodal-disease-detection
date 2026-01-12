@@ -1,3 +1,19 @@
+"""
+Purpose
+-------
+Defines feature extractors used during multimodal fusion training.
+
+Components
+----------
+- DenseNetFeatureExtractor: returns pooled CNN features (dim = out_dim)
+- BertCLSFeatureExtractor: returns CLS embedding (dim = hidden_size)
+
+Notes
+-----
+- Encoders are frozen during fusion training to reduce overfitting and improve reproducibility.
+- This design supports modular swapping of encoders or fine-tuning as future work.
+"""
+
 import torch.nn as nn
 from torchvision import models
 from torchvision.models import DenseNet121_Weights

@@ -1,3 +1,17 @@
+"""
+Trains a text-only ClinicalBERT baseline on data/clinical_text.csv.
+
+Outputs
+-------
+- reports/text_model_best.pt
+- reports/text_metrics.txt
+
+Evaluation
+----------
+- train/val/test split
+- ROC-AUC and F1 with confusion matrix
+"""
+
 from src.models.text_encoder import ClinicalBertClassifier
 from src.datasets.text_dataset import TextDatasetConfig, TextCSVDataset
 from tqdm import tqdm
