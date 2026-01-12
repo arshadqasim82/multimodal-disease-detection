@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
@@ -18,6 +19,9 @@ def main():
     model.load_state_dict(torch.load(
         "reports/image_model_best.pt", map_location=device))
     model.eval()
+
+    # ✅ Ensure gradients are enabled (Grad-CAM needs them for hooks)
+    torch.set_grad_enabled(True)
 
     target_layer = model.backbone.features[-1]
     cam = GradCAM(model, target_layer)
@@ -34,10 +38,10 @@ def main():
         x, y, path = ds[i]
         x1 = x.unsqueeze(0).to(device)
 
-        with torch.no_grad():
-            logits = model(x1)
-            prob1 = torch.softmax(logits, dim=1)[0, 1].item()
-            pred = int(torch.argmax(logits, dim=1).item())
+        # ✅ IMPORTANT: no torch.no_grad() here (Grad-CAM requires grad-enabled activations)
+        logits = model(x1)
+        prob1 = torch.softmax(logits, dim=1)[0, 1].item()
+        pred = int(torch.argmax(logits, dim=1).item())
 
         y_int = int(y)
         if y_int == 1 and pred == 1 and len(buckets["TP"]) < k:
