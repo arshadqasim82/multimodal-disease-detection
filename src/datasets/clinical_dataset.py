@@ -1,7 +1,3 @@
-# Synthetic Clinical Text Generator (Effusion vs No Finding)
-# Produces: data/clinical_text_paired.csv
-# Input: nih_sample/sample/sample_labels.csv (or your sample_labels.csv)
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -9,15 +5,28 @@ from pathlib import Path
 # -----------------------------
 # CONFIG
 # -----------------------------
-INPUT_CSV = "nih_sample/sample/sample_labels.csv"   # change if needed
+INPUT_CSV = "nih_sample/sample/sample_labels.csv"     # or your path
 OUT_CSV = "data/clinical_text_paired.csv"
+
 RANDOM_SEED = 42
 
-POS_LABEL = "Effusion"      # target task: Effusion vs No Finding
-NEG_LABEL = "No Finding"    # used later for "clean negatives" if you choose
+POS_LABEL = "Effusion"
+NEG_EXACT = "No Finding"
+
+# Controls to reduce label leakage:
+P_EXPLICIT_POS = 0.25   # only 25% of positive reports explicitly say "pleural effusion"
+# only 35% of normals explicitly say "No pleural effusion"
+P_NO_PLEURAL_EFFUSION_IN_NORMAL = 0.35
+
+# Optional: inject small label noise into text (NOT into labels!)
+# This means sometimes a positive report sounds less clear, and sometimes normal is less clean.
+P_TEXT_AMBIGUITY = 0.20
+
+# Optional: corruption experiment (set >0 for robustness). Keep 0.0 for main dataset.
+P_CORRUPT_TEXT = 0.0     # e.g., 0.15 to randomly drop a sentence 15% of the time
 
 # -----------------------------
-# RNG (reproducible)
+# RNG
 # -----------------------------
 RNG = np.random.default_rng(RANDOM_SEED)
 
@@ -30,31 +39,34 @@ def maybe(p: float) -> bool:
     return bool(RNG.random() < p)
 
 
-def generate_synthetic_report(finding_labels: str) -> str:
-    """
-    Generate a radiology-style snippet paired to the label string.
-    - Variable templates
-    - Negations
-    - Optional uncertainty
-    - No laterality (no left/right)
-    - Anti-cheat: positives often use implicit wording (not always 'pleural effusion')
-    """
-    labels = str(finding_labels)
+def corrupt_text(sentences):
+    """Randomly drop one sentence to simulate incomplete documentation."""
+    if len(sentences) <= 1:
+        return sentences
+    drop_idx = int(RNG.integers(0, len(sentences)))
+    return [s for i, s in enumerate(sentences) if i != drop_idx]
 
-    use_headers = maybe(0.6)
 
-    # --- Phrase banks ---
-    effusion_explicit = [
+def generate_report_from_labels(labels: str) -> str:
+    labels = str(labels).strip()
+
+    # Banks (avoid laterality)
+    pos_explicit = [
         "Small pleural effusion is present.",
         "Pleural effusion is noted.",
-        "Findings are consistent with pleural effusion."
+        "Findings are consistent with a pleural effusion."
     ]
-    effusion_implicit = [
-        "Blunting of the costophrenic angle suggests pleural fluid.",
-        "There is basilar opacity with a configuration suggesting layering fluid.",
-        "Dependent fluid is suspected within the pleural space.",
-        "Mild fluid accumulation is suspected.",
-        "A small amount of pleural fluid is suspected."
+    pos_implicit = [
+        "Blunting of the costophrenic angle is noted.",
+        "There is dependent basilar opacity which may reflect layering fluid.",
+        "Mild fluid layering is suspected.",
+        "Subtle costophrenic angle blunting suggests a small volume of fluid.",
+        "A small dependent opacity pattern is present, which can be seen with pleural fluid."
+    ]
+    pos_ambiguous = [
+        "A subtle basilar opacity is present; correlate clinically.",
+        "Basilar changes are present; etiology is nonspecific.",
+        "Mild basilar opacity is present; follow-up imaging may be helpful."
     ]
 
     normal_findings = [
@@ -64,19 +76,21 @@ def generate_synthetic_report(finding_labels: str) -> str:
         "No focal airspace disease is seen.",
         "No acute intrathoracic process is identified."
     ]
+    normal_impression = [
+        "No acute disease.",
+        "No acute cardiopulmonary process.",
+        "Normal chest radiograph."
+    ]
 
-    # Negations (safe, non-lateral)
-    negations_common = [
+    # Negations (non-lateral)
+    neg_common = [
         "No pneumothorax.",
         "No focal consolidation.",
         "No cardiomegaly.",
         "No acute osseous abnormality."
     ]
-    # Extra negatives commonly listed on normal exams
-    negations_normal_extra = [
-        "No pleural effusion.",
-        "No edema."
-    ]
+    # Keep this optional to avoid making normals perfectly separable
+    neg_pleural = "No pleural effusion."
 
     uncertainty = [
         "Clinical correlation is recommended.",
@@ -85,91 +99,122 @@ def generate_synthetic_report(finding_labels: str) -> str:
         "Technique is suboptimal; correlate clinically."
     ]
 
+    sentences = []
+    use_headers = maybe(0.6)
+
+    is_pos = (POS_LABEL in labels)
+    is_clean_normal = (labels == NEG_EXACT)
+
     findings = []
     impression = []
 
-    if POS_LABEL in labels:
-        # Mix implicit/explicit to reduce pure keyword detection
-        if maybe(0.70):
-            findings.append(choose(effusion_implicit))
-        if maybe(0.55):
-            impression.append(choose(effusion_explicit))
+    if is_pos:
+        # Implicit most of the time, explicit sometimes
+        if maybe(1.0 - P_TEXT_AMBIGUITY):
+            findings.append(choose(pos_implicit))
         else:
-            impression.append("Findings suggest pleural fluid.")
+            findings.append(choose(pos_ambiguous))
 
-        # Add relevant negatives (avoid contradiction: do NOT add "No pleural effusion" here)
-        if maybe(0.80):
-            findings.append(choose(negations_common))
-
-        # Optional additional statement
-        if maybe(0.35):
-            findings.append(choose([
-                "No significant mediastinal widening.",
-                "No large pleural collection.",
-                "No displaced rib fracture is seen."
+        if maybe(P_EXPLICIT_POS) and (not maybe(P_TEXT_AMBIGUITY)):
+            impression.append(choose(pos_explicit))
+        else:
+            # softer wording
+            impression.append(choose([
+                "Findings may reflect a small pleural fluid volume.",
+                "A small pleural fluid component is suspected.",
+                "Consider pleural fluid; correlate clinically."
             ]))
 
-    elif labels.strip() == NEG_LABEL:
+        if maybe(0.75):
+            findings.append(choose(neg_common))
+
+        if maybe(0.25):
+            impression.append(choose(uncertainty))
+
+    elif is_clean_normal:
         findings.append(choose(normal_findings))
 
-        # Normal reports often list multiple negatives, including "No pleural effusion"
-        if maybe(0.85):
-            pool = negations_common + negations_normal_extra
-            k = int(RNG.integers(2, 4))  # choose 2-3
-            chosen = RNG.choice(pool, size=k, replace=False)
-            findings.extend(list(chosen))
+        # Add some negations, but not always all of them
+        if maybe(0.70):
+            findings.append(choose(neg_common))
 
-        impression.append(choose([
-            "No acute disease.",
-            "Normal chest radiograph.",
-            "No acute cardiopulmonary process."
-        ]))
+        # Only sometimes include the “No pleural effusion” phrase
+        if maybe(P_NO_PLEURAL_EFFUSION_IN_NORMAL) and (not maybe(P_TEXT_AMBIGUITY)):
+            findings.append(neg_pleural)
+
+        # Sometimes add mild uncertainty (to prevent trivially separable wording)
+        if maybe(P_TEXT_AMBIGUITY):
+            impression.append(choose([
+                "No acute abnormality is identified; correlate clinically.",
+                "No acute process; clinical correlation is advised."
+            ]))
+        else:
+            impression.append(choose(normal_impression))
+
+        if maybe(0.15):
+            impression.append(choose(uncertainty))
 
     else:
-        # For non-effusion abnormal cases (kept for full-dataset pairing)
+        # Other abnormalities: generic abnormal description (kept for full CSV pairing)
         findings.append(
             f"Reported findings include: {labels.replace('|', ', ').lower()}.")
         impression.append("Clinical correlation is recommended.")
 
-    # Optional uncertainty/noise suffix
-    if maybe(0.25):
-        impression.append(choose(uncertainty))
-
-    # Compose final text
+    # Compose sentences
     if use_headers:
-        report = f"FINDINGS: {' '.join(findings)} IMPRESSION: {' '.join(impression)}"
+        sentences.append(f"FINDINGS: {' '.join(findings)}")
+        sentences.append(f"IMPRESSION: {' '.join(impression)}")
     else:
-        report = " ".join(findings + impression)
+        sentences.extend(findings + impression)
 
-    return " ".join(report.split())
+    # Optional corruption experiment
+    if P_CORRUPT_TEXT > 0 and maybe(P_CORRUPT_TEXT):
+        sentences = corrupt_text(sentences)
+
+    return " ".join(" ".join(sentences).split())
 
 
-# -----------------------------
-# RUN
-# -----------------------------
-df = pd.read_csv(INPUT_CSV)
+def main():
+    df = pd.read_csv(INPUT_CSV)
 
-required = ["Image Index", "Patient ID", "Finding Labels"]
-missing = [c for c in required if c not in df.columns]
-if missing:
-    raise ValueError(f"Missing required columns in {INPUT_CSV}: {missing}")
+    required = ["Image Index", "Patient ID", "Finding Labels"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in {INPUT_CSV}: {missing}")
 
-# Binary label for Effusion (1 if contains Effusion, else 0)
-df["label"] = df["Finding Labels"].astype(
-    str).str.contains(POS_LABEL, regex=False).astype(int)
+    # Label stays exactly as before (ground truth)
+    df["label"] = df["Finding Labels"].astype(
+        str).str.contains(POS_LABEL, regex=False).astype(int)
 
-# Generate paired synthetic text
-df["text"] = df["Finding Labels"].astype(str).apply(generate_synthetic_report)
+    # New text generation (harder / less leaky)
+    df["text"] = df["Finding Labels"].astype(
+        str).apply(generate_report_from_labels)
 
-# Output (keep key columns)
-out = df[["Image Index", "Patient ID", "Finding Labels", "text", "label"]].copy()
+    out = df[["Image Index", "Patient ID",
+              "Finding Labels", "text", "label"]].copy()
+    Path(OUT_CSV).parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(OUT_CSV, index=False)
 
-Path(OUT_CSV).parent.mkdir(parents=True, exist_ok=True)
-out.to_csv(OUT_CSV, index=False)
+    # Print quick stats
+    pos = int(out["label"].sum())
+    neg = int((out["label"] == 0).sum())
+    print("Saved:", OUT_CSV)
+    print("Rows:", len(out))
+    print("Pos (Effusion):", pos)
+    print("Neg:", neg)
 
-print("Saved:", OUT_CSV)
-print("Rows:", len(out))
-print("Pos (Effusion):", int(out["label"].sum()))
-print("Neg:", int((out["label"] == 0).sum()))
-print("\nExample positive:\n", out[out["label"] == 1].iloc[0]["text"])
-print("\nExample negative:\n", out[out["label"] == 0].iloc[0]["text"])
+    # Show examples
+    ex_pos = out[out["label"] == 1].sample(3, random_state=1)[
+        ["Finding Labels", "text"]]
+    ex_neg = out[out["label"] == 0].sample(3, random_state=1)[
+        ["Finding Labels", "text"]]
+    print("\n--- Example positives ---")
+    for _, r in ex_pos.iterrows():
+        print("-", r["text"])
+    print("\n--- Example negatives ---")
+    for _, r in ex_neg.iterrows():
+        print("-", r["text"])
+
+
+if __name__ == "__main__":
+    main()
