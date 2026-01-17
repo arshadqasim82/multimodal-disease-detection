@@ -1,6 +1,12 @@
 """
 Trains multimodal fusion models (concat and attention) using frozen encoders.
 
+UPDATED FOR IU PAIRED DATASET (image_path + report text)
+--------------------------------------------------------
+We train a binary "matching" task:
+- label=1: image paired with its true report
+- label=0: image paired with a random wrong report (negative sample)
+
 Outputs
 -------
 - reports/fusion_concat_best.pt
@@ -9,16 +15,24 @@ Outputs
 
 Evaluation
 ----------
-- Stratified split by image labels
+- Split by uid to avoid leakage across views/studies
 - ROC-AUC, PR-AUC
 - F1 at validation-tuned threshold
 - Confusion matrices
 """
 
-# src/training/train_fusion.py
-from src.models.fusion import ConcatFusion, AttentionFusion
+from src.datasets.multimodal_dataset import MultimodalDatasetConfig, PairedCSVMatchDataset
 from src.models.feature_extractors import DenseNetFeatureExtractor, BertCLSFeatureExtractor
-from src.datasets.multimodal_dataset import MultimodalDatasetConfig, PairedIndexMultimodalDataset
+from src.models.fusion import ConcatFusion, AttentionFusion
+from pathlib import Path
+import sys
+import random
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -27,14 +41,13 @@ from sklearn.metrics import (
     confusion_matrix,
     average_precision_score,
 )
-from torch.utils.data import DataLoader, Subset
-import torch.nn as nn
-import torch
-import numpy as np
-import random
-import sys
-from pathlib import Path
+
+# Ensure repo root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+# IMPORTANT: this expects you replaced src/datasets/multimodal_dataset.py
+# with the IU paired CSV matching dataset class:
 
 
 def set_seed(seed: int = 42):
@@ -117,54 +130,69 @@ def metrics_from_probs(labels, probs, threshold=0.5):
     return auc, prauc, f1, cm
 
 
-def stratified_split_indices(ds, seed=42):
+def build_uid_split_indices(paired_csv: str, seed: int = 42):
     """
-    Stratify by image label (the target label of the multimodal dataset).
+    Split by uid to avoid leakage across frontal/lateral views.
+    Returns arrays of row indices for train/val/test.
     """
-    labels = []
-    for i in range(len(ds)):
-        labels.append(int(ds[i]["label"]))
-    labels = np.asarray(labels)
+    df = pd.read_csv(paired_csv)
+    if "uid" not in df.columns:
+        raise ValueError(
+            "paired_csv must contain a 'uid' column for uid-based splitting.")
 
-    idx = np.arange(len(ds))
-    train_idx, temp_idx, y_train, y_temp = train_test_split(
-        idx, labels, test_size=0.30, random_state=seed, stratify=labels
-    )
-    val_idx, test_idx, y_val, y_test = train_test_split(
-        temp_idx, y_temp, test_size=0.50, random_state=seed, stratify=y_temp
-    )
+    uids = df["uid"].unique()
+
+    # 70/15/15 split
+    train_u, temp_u = train_test_split(uids, test_size=0.30, random_state=seed)
+    val_u, test_u = train_test_split(temp_u, test_size=0.50, random_state=seed)
+
+    train_idx = df.index[df["uid"].isin(train_u)].to_numpy()
+    val_idx = df.index[df["uid"].isin(val_u)].to_numpy()
+    test_idx = df.index[df["uid"].isin(test_u)].to_numpy()
+
     return train_idx, val_idx, test_idx
 
 
-def run_experiment(fusion_type: str):
+def run_experiment(
+    fusion_type: str,
+    paired_csv: str,
+    tokenizer_name: str = "emilyalsentzer/Bio_ClinicalBERT",
+    batch_size: int = 8,
+    max_length: int = 192,
+    image_size: int = 224,
+    neg_prob: float = 0.5,
+    epochs: int = 10,
+    lr: float = 2e-4,
+):
     set_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     cfg = MultimodalDatasetConfig(
-        image_root="data/images",
-        text_csv="data/clinical_text.csv",
-        tokenizer_name="emilyalsentzer/Bio_ClinicalBERT",
-        max_length=192,
-        image_size=224
+        paired_csv=paired_csv,
+        tokenizer_name=tokenizer_name,
+        max_length=max_length,
+        image_size=image_size,
+        neg_prob=neg_prob,
     )
-    ds = PairedIndexMultimodalDataset(cfg)
 
-    train_idx, val_idx, test_idx = stratified_split_indices(ds, seed=42)
-    train_ds = Subset(ds, train_idx)
-    val_ds = Subset(ds, val_idx)
-    test_ds = Subset(ds, test_idx)
+    train_idx, val_idx, test_idx = build_uid_split_indices(paired_csv, seed=42)
 
-    train_loader = DataLoader(train_ds, batch_size=8,
-                              shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=8, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_ds, batch_size=8,
-                             shuffle=False, num_workers=2)
+    # Build datasets with deterministic seeds for negative sampling
+    train_ds = PairedCSVMatchDataset(cfg, indices=train_idx, seed=42)
+    val_ds = PairedCSVMatchDataset(cfg, indices=val_idx, seed=123)
+    test_ds = PairedCSVMatchDataset(cfg, indices=test_idx, seed=999)
 
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=batch_size,
+                            shuffle=False, num_workers=2)
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+
+    # Frozen encoders (same as your original)
     img_enc = DenseNetFeatureExtractor().to(device)
-    txt_enc = BertCLSFeatureExtractor(
-        "emilyalsentzer/Bio_ClinicalBERT").to(device)
+    txt_enc = BertCLSFeatureExtractor(tokenizer_name).to(device)
 
-    # Freeze encoders
     for p in img_enc.parameters():
         p.requires_grad = False
     for p in txt_enc.parameters():
@@ -176,23 +204,23 @@ def run_experiment(fusion_type: str):
     if fusion_type == "concat":
         fusion = ConcatFusion(img_dim, txt_dim, hidden=256,
                               num_classes=2).to(device)
-        optimizer = torch.optim.AdamW(fusion.parameters(), lr=2e-4)
+        optimizer = torch.optim.AdamW(fusion.parameters(), lr=lr)
     elif fusion_type == "attention":
         fusion = AttentionFusion(
             img_dim, txt_dim, hidden=256, num_classes=2).to(device)
-        optimizer = torch.optim.AdamW(fusion.parameters(), lr=2e-4)
+        optimizer = torch.optim.AdamW(fusion.parameters(), lr=lr)
     else:
-        raise ValueError("fusion_type must be concat or attention")
+        raise ValueError("fusion_type must be 'concat' or 'attention'")
 
     criterion = nn.CrossEntropyLoss()
 
     best_val_auc = -1.0
-    best_path = f"reports/fusion_{fusion_type}_best.pt"
     Path("reports").mkdir(exist_ok=True)
+    best_path = f"reports/fusion_{fusion_type}_best.pt"
 
-    for epoch in range(10):
+    for epoch in range(epochs):
         fusion.train()
-        for b in tqdm(train_loader, desc=f"{fusion_type} Epoch {epoch+1}"):
+        for b in tqdm(train_loader, desc=f"{fusion_type} Epoch {epoch+1}/{epochs}"):
             img = b["image"].to(device)
             input_ids = b["input_ids"].to(device)
             attention_mask = b["attention_mask"].to(device)
@@ -212,7 +240,7 @@ def run_experiment(fusion_type: str):
             loss.backward()
             optimizer.step()
 
-        # Validation metrics + threshold selection
+        # Validation
         if fusion_type == "concat":
             y_val, p_val = collect_probs_concat(
                 img_enc, txt_enc, fusion, val_loader, device)
@@ -228,19 +256,23 @@ def run_experiment(fusion_type: str):
             y_val, p_val, threshold=t_best)
 
         if w_mean is None:
-            print(f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
-                  f"best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\nVAL CM@best_t:\n{val_cm_best}")
+            print(
+                f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
+                f"best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\nVAL CM@best_t:\n{val_cm_best}"
+            )
         else:
-            print(f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
-                  f"mean[w_img,w_txt]={w_mean} | best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\n"
-                  f"VAL CM@best_t:\n{val_cm_best}")
+            print(
+                f"{fusion_type} | VAL ROC-AUC: {val_auc:.4f} | VAL PR-AUC: {val_prauc:.4f} | "
+                f"mean[w_img,w_txt]={w_mean} | best_t={t_best:.2f} | VAL F1@best_t: {val_f1_best:.4f}\n"
+                f"VAL CM@best_t:\n{val_cm_best}"
+            )
 
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             torch.save(fusion.state_dict(), best_path)
             print("✅ Saved new best fusion model")
 
-    # Final test evaluation using best checkpoint and best threshold from VAL of that checkpoint
+    # Test with best checkpoint
     fusion.load_state_dict(torch.load(best_path, map_location=device))
 
     if fusion_type == "concat":
@@ -250,15 +282,13 @@ def run_experiment(fusion_type: str):
             img_enc, txt_enc, fusion, test_loader, device)
         w_mean = None
     else:
-        y_val, p_val, w_mean = collect_probs_attn(
+        y_val, p_val, w_mean_val = collect_probs_attn(
             img_enc, txt_enc, fusion, val_loader, device)
         y_test, p_test, w_mean_test = collect_probs_attn(
             img_enc, txt_enc, fusion, test_loader, device)
-        # report test mean weights too
         w_mean = w_mean_test
 
     t_best, _ = best_f1_threshold(y_val, p_val)
-
     test_auc, test_prauc, test_f1, test_cm = metrics_from_probs(
         y_test, p_test, threshold=t_best)
 
@@ -267,13 +297,17 @@ def run_experiment(fusion_type: str):
         print(
             f"TEST ROC-AUC: {test_auc:.4f} | TEST PR-AUC: {test_prauc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f}")
     else:
-        print(f"TEST ROC-AUC: {test_auc:.4f} | TEST PR-AUC: {test_prauc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f} "
-              f"| mean[w_img,w_txt]={w_mean}")
+        print(
+            f"TEST ROC-AUC: {test_auc:.4f} | TEST PR-AUC: {test_prauc:.4f} | "
+            f"TEST F1@t={t_best:.2f}: {test_f1:.4f} | mean[w_img,w_txt]={w_mean}"
+        )
     print("TEST CM:\n", test_cm)
 
     # Save metrics
     metrics_path = f"reports/fusion_{fusion_type}_metrics.txt"
     with open(metrics_path, "w") as f:
+        f.write(f"PAIRED_CSV={paired_csv}\n")
+        f.write(f"NEG_PROB={neg_prob}\n")
         f.write(f"VAL_BEST_ROC_AUC={best_val_auc:.4f}\n")
         f.write(f"BEST_THRESHOLD={t_best:.2f}\n")
         f.write(f"TEST_ROC_AUC={test_auc:.4f}\n")
@@ -287,10 +321,14 @@ def run_experiment(fusion_type: str):
 
 
 def main():
+    # UPDATE THIS PATH to your IU paired CSV
+    paired_csv = "/content/multimodal-dx/IU_DIR/iu_dataset.csv"
+
     print("Running CONCAT experiment...")
-    run_experiment("concat")
+    run_experiment("concat", paired_csv=paired_csv)
+
     print("\nRunning ATTENTION experiment...")
-    run_experiment("attention")
+    run_experiment("attention", paired_csv=paired_csv)
 
 
 if __name__ == "__main__":

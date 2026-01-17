@@ -28,7 +28,7 @@ or
 Notes
 -----
 - Tokenization uses a transformer tokenizer (e.g., Bio_ClinicalBERT).
-- For IU dataset, we train/fuse using paired alignment rather than labels.
+- For IU dataset, we typically train/fuse using paired alignment rather than disease labels.
 """
 
 from dataclasses import dataclass
@@ -76,7 +76,7 @@ class TextCSVDataset(Dataset):
             elif "uid" in self.df.columns:
                 target_col = "uid"
             else:
-                target_col = None  # purely unlabeled (rare)
+                target_col = None
 
         self.target_col = target_col
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
@@ -97,7 +97,6 @@ class TextCSVDataset(Dataset):
         )
         item = {k: v.squeeze(0) for k, v in enc.items()}
 
-        # Add target if present
         if self.target_col is not None:
             if self.target_col == "label":
                 item["label"] = torch.tensor(
@@ -105,7 +104,6 @@ class TextCSVDataset(Dataset):
             elif self.target_col == "uid":
                 item["uid"] = torch.tensor(int(row["uid"]), dtype=torch.long)
             else:
-                # generic numeric target
                 item[self.target_col] = torch.tensor(
                     int(row[self.target_col]), dtype=torch.long)
 

@@ -2,21 +2,23 @@
 Purpose
 -------
 Defines a multimodal dataset that returns aligned image + text inputs
-from a single paired CSV (e.g., IU Chest X-Rays).
+from a single paired CSV (e.g., IU Chest X-Rays), with a binary matching task.
 
-Pairing Strategy
-----------------
-Reads one CSV containing aligned rows:
-- image_path: path to image file
-- text: report text
-- uid: group id (optional; useful for grouping / evaluation)
+Task
+----
+Binary matching:
+  label=1 -> (image, its own report text)
+  label=0 -> (image, a random other report text)
 
-Labeling
---------
-IU paired dataset does not provide binary disease labels by default.
-This dataset can optionally return:
-- uid (recommended for contrastive/retrieval training)
-- a dummy label (0) if a training loop hard-requires "label"
+This keeps your existing fusion training loop and ROC-AUC/F1 evaluation valid.
+
+CSV Format
+----------
+Requires:
+- image_path: str
+- text: str
+Optional:
+- uid: int (used for leakage-safe splitting outside this dataset)
 
 Outputs
 -------
@@ -24,82 +26,98 @@ Returns dict:
 - image: tensor [3, H, W]
 - input_ids: tensor [L]
 - attention_mask: tensor [L]
+- label: scalar long (0/1)
 - uid: scalar long (if available)
-- label: scalar long (optional dummy, if requested)
 """
 
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import random
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-# we will add this helper if missing
 from src.datasets.image_dataset import load_image_tensor
-from src.datasets.text_dataset import TextDatasetConfig, TextCSVDataset
+from transformers import AutoTokenizer
 
 
 @dataclass
 class MultimodalDatasetConfig:
-    paired_csv: str                 # <- NEW: single source of truth
+    paired_csv: str
     tokenizer_name: str
     max_length: int = 192
     image_size: int = 224
-    return_label: bool = False      # if True, returns dummy label=0
+    neg_prob: float = 0.5  # probability of returning a mismatched pair
 
 
-class PairedCSVMultimodalDataset(Dataset):
+class PairedCSVMatchDataset(Dataset):
     """
-    Reads aligned image-text pairs from one CSV.
+    Paired CSV dataset with negative sampling to create a binary matching task.
     """
 
-    def __init__(self, cfg: MultimodalDatasetConfig):
-        self.df = pd.read_csv(cfg.paired_csv)
+    def __init__(self, cfg: MultimodalDatasetConfig, indices=None, seed: int = 42):
+        self.cfg = cfg
+        self.rng = random.Random(seed)
+
+        df = pd.read_csv(cfg.paired_csv)
+        if indices is not None:
+            df = df.iloc[indices]
+        self.df = df.reset_index(drop=True)
 
         required = {"image_path", "text"}
         if not required.issubset(set(self.df.columns)):
             raise ValueError(
                 f"paired_csv must contain {required}, got {set(self.df.columns)}")
 
-        # Text tokenizer dataset (reuses your existing tokenization)
-        # We want uid back if it exists; otherwise it's fine.
-        target_col = "uid" if "uid" in self.df.columns else None
-        self.text_ds = TextCSVDataset(TextDatasetConfig(
-            csv_path=cfg.paired_csv,
-            tokenizer_name=cfg.tokenizer_name,
-            max_length=cfg.max_length,
-            target_col=target_col,
-        ))
+        self.has_uid = "uid" in self.df.columns
+        self.all_texts = self.df["text"].astype(str).tolist()
 
-        self.image_size = cfg.image_size
-        self.return_label = cfg.return_label
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
 
     def __len__(self):
         return len(self.df)
+
+    def _tokenize(self, text: str) -> Dict[str, torch.Tensor]:
+        enc = self.tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=self.cfg.max_length,
+            return_tensors="pt",
+        )
+        return {k: v.squeeze(0) for k, v in enc.items()}
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         row = self.df.iloc[idx]
         img_path = str(row["image_path"])
 
-        # Image tensor
-        x_img = load_image_tensor(img_path, image_size=self.image_size)
+        # image tensor
+        x_img = load_image_tensor(img_path, image_size=self.cfg.image_size)
 
-        # Tokenized text
-        t = self.text_ds[idx]
+        # positive vs negative
+        is_negative = (self.rng.random() < self.cfg.neg_prob)
+
+        if not is_negative:
+            text = str(row["text"])
+            label = 1
+        else:
+            j = idx
+            while j == idx:
+                j = self.rng.randrange(0, len(self.all_texts))
+            text = self.all_texts[j]
+            label = 0
+
+        t = self._tokenize(text)
 
         out = {
             "image": x_img,
             "input_ids": t["input_ids"],
             "attention_mask": t["attention_mask"],
+            "label": torch.tensor(label, dtype=torch.long),
         }
 
-        # include uid if available
-        if "uid" in t:
-            out["uid"] = t["uid"]
-
-        # optional dummy label for compatibility
-        if self.return_label:
-            out["label"] = torch.tensor(0, dtype=torch.long)
+        if self.has_uid:
+            out["uid"] = torch.tensor(int(row["uid"]), dtype=torch.long)
 
         return out
