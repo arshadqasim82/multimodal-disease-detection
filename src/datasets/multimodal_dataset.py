@@ -1,17 +1,22 @@
 """
 Purpose
 -------
-Defines a multimodal dataset wrapper that returns aligned image + text inputs.
+Defines a multimodal dataset that returns aligned image + text inputs
+from a single paired CSV (e.g., IU Chest X-Rays).
 
 Pairing Strategy
 ----------------
-Pairs image samples and text samples by index (engineering demonstration).
-This is not patient-level fusion because the datasets are not linked.
+Reads one CSV containing aligned rows:
+- image_path: path to image file
+- text: report text
+- uid: group id (optional; useful for grouping / evaluation)
 
 Labeling
 --------
-The multimodal target label is taken from the IMAGE task
-(Effusion vs No Finding), to support consistent evaluation.
+IU paired dataset does not provide binary disease labels by default.
+This dataset can optionally return:
+- uid (recommended for contrastive/retrieval training)
+- a dummy label (0) if a training loop hard-requires "label"
 
 Outputs
 -------
@@ -19,51 +24,82 @@ Returns dict:
 - image: tensor [3, H, W]
 - input_ids: tensor [L]
 - attention_mask: tensor [L]
-- label: scalar (0/1)
+- uid: scalar long (if available)
+- label: scalar long (optional dummy, if requested)
 """
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from src.datasets.image_dataset import ImageDatasetConfig, ImageFolderBinaryDataset
+# we will add this helper if missing
+from src.datasets.image_dataset import load_image_tensor
 from src.datasets.text_dataset import TextDatasetConfig, TextCSVDataset
 
 
 @dataclass
 class MultimodalDatasetConfig:
-    image_root: str
-    text_csv: str
+    paired_csv: str                 # <- NEW: single source of truth
     tokenizer_name: str
     max_length: int = 192
     image_size: int = 224
+    return_label: bool = False      # if True, returns dummy label=0
 
 
-class PairedIndexMultimodalDataset(Dataset):
+class PairedCSVMultimodalDataset(Dataset):
     """
-    Pairs image samples and text samples by index (engineering demonstration).
-    Label is taken from the IMAGE task (Effusion vs No Finding).
+    Reads aligned image-text pairs from one CSV.
     """
 
     def __init__(self, cfg: MultimodalDatasetConfig):
-        self.image_ds = ImageFolderBinaryDataset(
-            ImageDatasetConfig(cfg.image_root, cfg.image_size))
-        self.text_ds = TextCSVDataset(TextDatasetConfig(
-            cfg.text_csv, cfg.tokenizer_name, cfg.max_length))
+        self.df = pd.read_csv(cfg.paired_csv)
 
-        self.n = min(len(self.image_ds), len(self.text_ds))
+        required = {"image_path", "text"}
+        if not required.issubset(set(self.df.columns)):
+            raise ValueError(
+                f"paired_csv must contain {required}, got {set(self.df.columns)}")
+
+        # Text tokenizer dataset (reuses your existing tokenization)
+        # We want uid back if it exists; otherwise it's fine.
+        target_col = "uid" if "uid" in self.df.columns else None
+        self.text_ds = TextCSVDataset(TextDatasetConfig(
+            csv_path=cfg.paired_csv,
+            tokenizer_name=cfg.tokenizer_name,
+            max_length=cfg.max_length,
+            target_col=target_col,
+        ))
+
+        self.image_size = cfg.image_size
+        self.return_label = cfg.return_label
 
     def __len__(self):
-        return self.n
+        return len(self.df)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        x_img, y_img, _ = self.image_ds[idx]
+        row = self.df.iloc[idx]
+        img_path = str(row["image_path"])
+
+        # Image tensor
+        x_img = load_image_tensor(img_path, image_size=self.image_size)
+
+        # Tokenized text
         t = self.text_ds[idx]
-        return {
+
+        out = {
             "image": x_img,
             "input_ids": t["input_ids"],
             "attention_mask": t["attention_mask"],
-            "label": y_img,
         }
+
+        # include uid if available
+        if "uid" in t:
+            out["uid"] = t["uid"]
+
+        # optional dummy label for compatibility
+        if self.return_label:
+            out["label"] = torch.tensor(0, dtype=torch.long)
+
+        return out

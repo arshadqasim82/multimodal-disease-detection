@@ -32,6 +32,22 @@ from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
 
+from PIL import Image
+import torchvision.transforms as T
+
+
+def load_image_tensor(image_path: str, image_size: int = 224) -> torch.Tensor:
+    """
+    Loads an image from a given path and returns a normalized tensor [3,H,W].
+    Assumes PNG/JPG.
+    """
+    img = Image.open(image_path).convert("RGB")
+    tfm = T.Compose([
+        T.Resize((image_size, image_size)),
+        T.ToTensor(),
+    ])
+    return tfm(img)
+
 
 @dataclass
 class ImageDatasetConfig:

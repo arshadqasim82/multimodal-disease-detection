@@ -1,29 +1,38 @@
 """
 Purpose
 -------
-Loads biomedical/clinical-style text samples for binary classification.
+Loads clinical text samples for either:
+1) Binary classification (legacy PubMedQA proxy)
+2) Unlabeled radiology report encoding (IU X-ray reports)
 
 Dataset Format
 -------------
-Expects a CSV with columns:
+Mode A: classification
 - text: str
 - label: int (0/1)
+
+Mode B: radiology/unlabeled
+- text: str
+- uid: int (group id / study id)
 
 Outputs
 -------
 __getitem__ returns a dict containing:
 - input_ids: torch.LongTensor [max_length]
 - attention_mask: torch.LongTensor [max_length]
-- label: torch.LongTensor scalar
+and either:
+- label: torch.LongTensor scalar              (classification)
+or
+- uid: torch.LongTensor scalar                (unlabeled)
 
 Notes
 -----
 - Tokenization uses a transformer tokenizer (e.g., Bio_ClinicalBERT).
-- This project uses PubMedQA-derived text as a proxy modality under access constraints.
+- For IU dataset, we train/fuse using paired alignment rather than labels.
 """
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 import torch
@@ -36,20 +45,40 @@ class TextDatasetConfig:
     csv_path: str
     tokenizer_name: str
     max_length: int = 128
+    target_col: Optional[str] = None  # "label" or "uid" or None (auto)
 
 
 class TextCSVDataset(Dataset):
     """
-    Expects CSV columns: text, label
+    Supports CSVs with:
+    - text + label (classification)
+    - text + uid   (unlabeled paired reports)
     """
 
     def __init__(self, cfg: TextDatasetConfig):
         self.df = pd.read_csv(cfg.csv_path)
-        required = {"text", "label"}
-        if not required.issubset(set(self.df.columns)):
-            raise ValueError(
-                f"CSV must contain {required}, got {set(self.df.columns)}")
 
+        if "text" not in self.df.columns:
+            raise ValueError(
+                f"CSV must contain 'text', got {set(self.df.columns)}")
+
+        # Decide target column
+        if cfg.target_col is not None:
+            target_col = cfg.target_col
+            if target_col not in self.df.columns:
+                raise ValueError(
+                    f"target_col='{target_col}' not in CSV columns {set(self.df.columns)}"
+                )
+        else:
+            # auto-detect
+            if "label" in self.df.columns:
+                target_col = "label"
+            elif "uid" in self.df.columns:
+                target_col = "uid"
+            else:
+                target_col = None  # purely unlabeled (rare)
+
+        self.target_col = target_col
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
         self.max_length = cfg.max_length
 
@@ -58,6 +87,7 @@ class TextCSVDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         row = self.df.iloc[idx]
+
         enc = self.tokenizer(
             str(row["text"]),
             truncation=True,
@@ -66,5 +96,17 @@ class TextCSVDataset(Dataset):
             return_tensors="pt",
         )
         item = {k: v.squeeze(0) for k, v in enc.items()}
-        item["label"] = torch.tensor(int(row["label"]), dtype=torch.long)
+
+        # Add target if present
+        if self.target_col is not None:
+            if self.target_col == "label":
+                item["label"] = torch.tensor(
+                    int(row["label"]), dtype=torch.long)
+            elif self.target_col == "uid":
+                item["uid"] = torch.tensor(int(row["uid"]), dtype=torch.long)
+            else:
+                # generic numeric target
+                item[self.target_col] = torch.tensor(
+                    int(row[self.target_col]), dtype=torch.long)
+
         return item
