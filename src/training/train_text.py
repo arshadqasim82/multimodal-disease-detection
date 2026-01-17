@@ -1,5 +1,14 @@
 """
-Trains a text-only ClinicalBERT baseline on data/clinical_text.csv.
+Trains a text-only ClinicalBERT baseline on IU paired data using a match/mismatch objective.
+
+Task
+----
+Binary classification:
+- label=1: the (image, report) pair is a true pair (positive)
+- label=0: the report is randomly swapped (negative)
+
+Text-only baseline uses ONLY the text but keeps the same labels.
+This is a sanity baseline; it should be near chance if negatives are drawn from the same distribution.
 
 Outputs
 -------
@@ -8,21 +17,25 @@ Outputs
 
 Evaluation
 ----------
-- train/val/test split
+- uid-based train/val/test split (to avoid leakage across views)
 - ROC-AUC and F1 with confusion matrix
 """
 
+from src.datasets.multimodal_dataset import MultimodalDatasetConfig, PairedCSVMatchDataset
 from src.models.text_encoder import ClinicalBertClassifier
-from src.datasets.text_dataset import TextDatasetConfig, TextCSVDataset
-from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
-from torch.utils.data import DataLoader, random_split
-import torch.nn as nn
-import torch
-import numpy as np
-import random
-import sys
 from pathlib import Path
+import sys
+import random
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
@@ -33,26 +46,54 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
-def evaluate(model, loader, device):
+def best_f1_threshold(labels, probs):
+    labels = np.asarray(labels)
+    probs = np.asarray(probs)
+    best_t, best_f1 = 0.5, -1.0
+    for t in np.linspace(0.05, 0.95, 19):
+        preds = (probs >= t).astype(int)
+        f1 = f1_score(labels, preds, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = float(f1)
+            best_t = float(t)
+    return best_t, best_f1
+
+
+@torch.no_grad()
+def evaluate(model, loader, device, threshold=0.5):
     model.eval()
     probs, labels = [], []
-    with torch.no_grad():
-        for batch in loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            y = batch["label"].cpu().numpy()
+    for batch in loader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        y = batch["label"].cpu().numpy()
 
-            logits = model(input_ids=input_ids, attention_mask=attention_mask)
-            p = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+        logits = model(input_ids=input_ids, attention_mask=attention_mask)
+        p = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
 
-            probs.extend(p)
-            labels.extend(y)
+        probs.extend(p)
+        labels.extend(y)
 
     auc = roc_auc_score(labels, probs)
-    preds = [1 if p >= 0.5 else 0 for p in probs]
-    f1 = f1_score(labels, preds)
+    preds = (np.asarray(probs) >= threshold).astype(int)
+    f1 = f1_score(labels, preds, zero_division=0)
     cm = confusion_matrix(labels, preds)
-    return auc, f1, cm
+    return float(auc), float(f1), cm, np.asarray(labels), np.asarray(probs)
+
+
+def build_uid_split_indices(paired_csv: str, seed: int = 42):
+    df = pd.read_csv(paired_csv)
+    if "uid" not in df.columns:
+        raise ValueError("paired_csv must contain 'uid' for uid-based split.")
+
+    uids = df["uid"].unique()
+    train_u, temp_u = train_test_split(uids, test_size=0.30, random_state=seed)
+    val_u, test_u = train_test_split(temp_u, test_size=0.50, random_state=seed)
+
+    train_idx = df.index[df["uid"].isin(train_u)].to_numpy()
+    val_idx = df.index[df["uid"].isin(val_u)].to_numpy()
+    test_idx = df.index[df["uid"].isin(test_u)].to_numpy()
+    return train_idx, val_idx, test_idx
 
 
 def main():
@@ -60,23 +101,25 @@ def main():
     set_seed(seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
     model_name = "emilyalsentzer/Bio_ClinicalBERT"
 
-    ds = TextCSVDataset(TextDatasetConfig(
-        csv_path="data/clinical_text.csv",
+    paired_csv = "/content/multimodal-dx/IU_DIR/iu_dataset.csv"
+
+    cfg = MultimodalDatasetConfig(
+        paired_csv=paired_csv,
         tokenizer_name=model_name,
-        max_length=192
-    ))
+        max_length=192,
+        image_size=224,   # unused in text-only training but required by config
+        neg_prob=0.5,
+    )
 
-    n_total = len(ds)
-    n_train = int(0.70 * n_total)
-    n_val = int(0.15 * n_total)
-    n_test = n_total - n_train - n_val
+    train_idx, val_idx, test_idx = build_uid_split_indices(
+        paired_csv, seed=seed)
 
-    generator = torch.Generator().manual_seed(seed)
-    train_ds, val_ds, test_ds = random_split(
-        ds, [n_train, n_val, n_test], generator=generator)
+    # We reuse PairedCSVMatchDataset but only consume text fields + label
+    train_ds = PairedCSVMatchDataset(cfg, indices=train_idx, seed=42)
+    val_ds = PairedCSVMatchDataset(cfg, indices=val_idx, seed=123)
+    test_ds = PairedCSVMatchDataset(cfg, indices=test_idx, seed=999)
 
     train_loader = DataLoader(train_ds, batch_size=8,
                               shuffle=True, num_workers=2)
@@ -90,11 +133,12 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
     best_val_auc = -1.0
+    best_path = "reports/text_model_best.pt"
     Path("reports").mkdir(exist_ok=True)
 
     for epoch in range(5):
         model.train()
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+        for batch in tqdm(train_loader, desc=f"Text Epoch {epoch+1}/5"):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             y = batch["label"].to(device)
@@ -105,26 +149,37 @@ def main():
             loss.backward()
             optimizer.step()
 
-        val_auc, val_f1, val_cm = evaluate(model, val_loader, device)
+        val_auc, _, _, y_val, p_val = evaluate(
+            model, val_loader, device, threshold=0.5)
+        t_best, val_f1_best = best_f1_threshold(y_val, p_val)
+        val_auc2, val_f1, val_cm, _, _ = evaluate(
+            model, val_loader, device, threshold=t_best)
+
         print(
-            f"Epoch {epoch+1} | VAL AUC: {val_auc:.4f} | VAL F1: {val_f1:.4f}")
+            f"Epoch {epoch+1} | VAL AUC: {val_auc2:.4f} | VAL F1@t={t_best:.2f}: {val_f1:.4f}")
         print("VAL Confusion Matrix:\n", val_cm)
 
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
-            torch.save(model.state_dict(), "reports/text_model_best.pt")
+        if val_auc2 > best_val_auc:
+            best_val_auc = val_auc2
+            torch.save(model.state_dict(), best_path)
             print("✅ Saved new best text model")
 
-    model.load_state_dict(torch.load(
-        "reports/text_model_best.pt", map_location=device))
-    test_auc, test_f1, test_cm = evaluate(model, test_loader, device)
+    model.load_state_dict(torch.load(best_path, map_location=device))
+    _, _, _, y_val, p_val = evaluate(model, val_loader, device, threshold=0.5)
+    t_best, _ = best_f1_threshold(y_val, p_val)
 
-    print("\n=== FINAL TEST RESULTS (best checkpoint) ===")
-    print(f"TEST AUC: {test_auc:.4f} | TEST F1: {test_f1:.4f}")
+    test_auc, test_f1, test_cm, _, _ = evaluate(
+        model, test_loader, device, threshold=t_best)
+
+    print("\n=== FINAL TEST RESULTS (best checkpoint, threshold tuned on VAL) ===")
+    print(f"TEST AUC: {test_auc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f}")
     print("TEST Confusion Matrix:\n", test_cm)
 
     with open("reports/text_metrics.txt", "w") as f:
+        f.write(f"PAIRED_CSV={paired_csv}\n")
+        f.write(f"NEG_PROB={cfg.neg_prob}\n")
         f.write(f"VAL_BEST_AUC={best_val_auc:.4f}\n")
+        f.write(f"BEST_THRESHOLD={t_best:.2f}\n")
         f.write(f"TEST_AUC={test_auc:.4f}\n")
         f.write(f"TEST_F1={test_f1:.4f}\n")
         f.write(f"TEST_CM=\n{test_cm}\n")
