@@ -1,5 +1,6 @@
 import random
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,25 @@ from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
 # -----------------------
 # Reproducibility
 # -----------------------
+MASK_WORDS = {
+    "effusion", "pleural", "fluid", "costophrenic", "blunting", "layering", "basilar",
+    "opacity", "dependent", "angle", "cp", "costophrenic-angle"
+}
+
+
+def mask_cue_words(text: str, p: float = 0.5) -> str:
+    # tokenize lightly; keep it simple and robust
+    toks = text.split()
+    out = []
+    for t in toks:
+        clean = re.sub(r"[^a-z]", "", t.lower())
+        if clean in MASK_WORDS and np.random.rand() < p:
+            out.append("[MASK]")
+        else:
+            out.append(t)
+    return " ".join(out)
+
+
 def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -27,8 +47,9 @@ def set_seed(seed: int = 42):
 # Dataset (reads split CSV)
 # -----------------------
 class CSVTextDataset(Dataset):
-    def __init__(self, csv_path: str, tokenizer, max_len: int = 192):
+    def __init__(self, csv_path: str, tokenizer, max_len: int = 192, is_train: bool = False):
         self.df = pd.read_csv(csv_path)
+        self.is_train = is_train
 
         required = ["text", "label"]
         missing = [c for c in required if c not in self.df.columns]
@@ -44,6 +65,9 @@ class CSVTextDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         text = str(row["text"])
+        if self.is_train:
+            text = mask_cue_words(text, p=0.5)
+
         y = int(row["label"])
 
         enc = self.tokenizer(
@@ -114,18 +138,20 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Patient-level splits from Phase 2
-    train_csv = "splits/train.csv"
-    val_csv = "splits/val.csv"
-    test_csv = "splits/test.csv"
+    train_csv = "splits_text_hardneg/train.csv"
+    val_csv = "splits_text_hardneg/val.csv"
+    test_csv = "splits_text_hardneg/test.csv"
 
     # ClinicalBERT (good default). If your repo used a different one, swap it here.
     MODEL_NAME = "emilyalsentzer/Bio_ClinicalBERT"
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    train_ds = CSVTextDataset(train_csv, tokenizer=tokenizer, max_len=192)
-    val_ds = CSVTextDataset(val_csv, tokenizer=tokenizer, max_len=192)
-    test_ds = CSVTextDataset(test_csv, tokenizer=tokenizer, max_len=192)
+    train_ds = CSVTextDataset(
+        train_csv, tokenizer=tokenizer, max_len=192, is_train=True)
+    val_ds = CSVTextDataset(val_csv, tokenizer=tokenizer,
+                            max_len=192, is_train=False)
+    test_ds = CSVTextDataset(
+        test_csv, tokenizer=tokenizer, max_len=192, is_train=False)
 
     train_loader = DataLoader(train_ds, batch_size=16,
                               shuffle=True, num_workers=2, pin_memory=True)
