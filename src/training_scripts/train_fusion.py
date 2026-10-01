@@ -1,26 +1,4 @@
-"""
-Trains multimodal fusion models (concat and attention) using frozen encoders
-on IU Chest X-ray paired image–report data.
 
-Task
-----
-Binary match vs mismatch:
-- label = 1 → image paired with its true report
-- label = 0 → image paired with a randomly swapped report
-
-Encoders
---------
-- Image: DenseNetFeatureExtractor (frozen)
-- Text : BertCLSFeatureExtractor (frozen)
-
-Only the fusion head is trained.
-
-Outputs
--------
-- reports/fusion_concat_best.pt
-- reports/fusion_attention_best.pt
-- reports/fusion_*_metrics.txt
-"""
 
 from src.datasets.multimodal_dataset import (
     MultimodalDatasetConfig,
@@ -44,13 +22,9 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix, average_precision_score
 
-# make repo root importable
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-# ------------------------
-# Utilities
-# ------------------------
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -147,10 +121,6 @@ def build_uid_split_indices(csv_path, seed=42):
 
     return train_idx, val_idx, test_idx
 
-
-# ------------------------
-# Main experiment
-# ------------------------
 
 def run_experiment(fusion_type: str, paired_csv: str):
     set_seed(42)

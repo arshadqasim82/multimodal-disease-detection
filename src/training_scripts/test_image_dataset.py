@@ -2,7 +2,7 @@ from src.datasets.image_dataset import ImageDatasetConfig, ImageFolderBinaryData
 import sys
 from pathlib import Path
 
-# Ensure repo root is on path when run from anywhere
+
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root))
 

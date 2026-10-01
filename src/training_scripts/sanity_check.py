@@ -17,7 +17,6 @@ def main():
     with torch.no_grad():
         out = model(**inputs)
 
-    # last_hidden_state shape: [batch, seq_len, hidden]
     print("ClinicalBERT last_hidden_state:",
           tuple(out.last_hidden_state.shape))
     print("Sanity check OK ✅")

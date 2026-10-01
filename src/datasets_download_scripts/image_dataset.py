@@ -1,24 +1,3 @@
-"""
-Purpose
--------
-Loads chest X-ray images for binary classification from an image folder structure,
-and also provides a helper for loading a single image by path for paired datasets.
-
-Folder Dataset Format (legacy)
-------------------------------
-image_root/
-  0/  (class 0 images)
-  1/  (class 1 images)
-
-Outputs (legacy)
-----------------
-ImageFolderBinaryDataset returns: (image_tensor, label, path)
-
-New Helper
-----------
-load_image_tensor(image_path, image_size) -> image_tensor
-"""
-
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -36,12 +15,6 @@ class ImageDatasetConfig:
 
 
 def load_image_tensor(image_path: str, image_size: int = 224) -> torch.Tensor:
-    """
-    Loads an image from a given path and returns a tensor [3, H, W].
-    Minimal transforms: resize + ToTensor.
-
-    This is used for IU paired CSV training where each row has an image_path.
-    """
     img = Image.open(image_path).convert("RGB")
     tfm = T.Compose([
         T.Resize((image_size, image_size)),
@@ -51,12 +24,6 @@ def load_image_tensor(image_path: str, image_size: int = 224) -> torch.Tensor:
 
 
 class ImageFolderBinaryDataset(Dataset):
-    """
-    Loads images from:
-      root/0/*.png
-      root/1/*.png
-    Returns (image_tensor, label, path)
-    """
 
     def __init__(self, cfg: ImageDatasetConfig):
         self.root = Path(cfg.image_root)

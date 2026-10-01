@@ -1,19 +1,3 @@
-"""
-Purpose
--------
-Image classification model based on DenseNet-121.
-
-Architecture
------------
-- DenseNet-121 backbone (ImageNet pretrained)
-- Global feature extraction from backbone
-- Linear classifier head -> 2 classes
-
-Notes
------
-- Implemented as a modular encoder so it can be reused in fusion experiments.
-- Trained on NIH subset task: Effusion vs No Finding.
-"""
 
 import torch
 import torch.nn as nn
@@ -27,7 +11,6 @@ class DenseNetImageEncoder(nn.Module):
         self.backbone = models.densenet121(pretrained=pretrained)
         in_features = self.backbone.classifier.in_features
 
-        # Replace classifier
         self.backbone.classifier = nn.Identity()
 
         self.classifier = nn.Linear(in_features, num_classes)

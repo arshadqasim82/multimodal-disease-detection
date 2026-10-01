@@ -1,182 +1,242 @@
-📌 Multimodal Diagnosis with Medical Images and Clinical Text
-Overview
+# Multimodal Deep Learning for Pneumonia Detection
 
-This project implements a multimodal medical diagnosis system that combines chest X-ray images and clinical text to perform binary disease classification. The goal is to evaluate whether fusing heterogeneous medical modalities improves diagnostic performance compared to unimodal models, while maintaining interpretability through explainable AI techniques.
+A lightweight, reproducible and explainable multimodal deep learning system for pneumonia detection from paired chest X-ray images and radiology reports.
 
-The system is designed with reproducibility, transparency, and explainability in mind, and is suitable for academic evaluation rather than clinical deployment.
+## Overview
 
-Datasets
+This project was developed as an MSc Artificial Intelligence dissertation. It investigates whether combining visual information from chest X-rays with clinical information contained in radiology reports can provide a more robust diagnostic classification system than image-only approaches.
 
-1. Chest X-ray Images
+The system uses:
 
-Dataset: NIH ChestX-ray14 (sampled subset)
+- **DenseNet-121** for chest X-ray feature extraction
+- **BioClinicalBERT** for clinical text representation
+- **Concatenation Fusion** as a simple multimodal baseline
+- **Gated Fusion** to learn the relative contribution of image and text modalities
+- **Grad-CAM** for visual explanations
+- **Token occlusion** for text-level explanations
+- **Patient-level splitting and fixed random seeds** for leakage prevention and reproducibility
+- **CPU-only execution** to keep the system accessible without specialised hardware
 
-Task: Binary classification
+> **Research-only notice:** This repository implements an academic research system and is not a clinical diagnostic device. Predictions should not be used for patient diagnosis or treatment decisions.
 
-Positive: Effusion
+## Research Motivation
 
-Negative: No Finding
+Chest X-rays provide important spatial information but can be ambiguous because of overlapping anatomy and subtle abnormalities. Radiology reports provide complementary semantic and clinical context.
 
-Rationale:
-Effusion provides sufficient class imbalance and visual complexity for meaningful evaluation while remaining computationally feasible in Google Colab.
+A major methodological risk in multimodal medical AI is **label leakage**: if diagnostic conclusions are included directly in model input, a model can learn the answer rather than the underlying task.
 
-2. Clinical Text
+This project therefore separates report sections:
 
-Dataset: PubMed-QA (labeled subset)
+- **Impression** → used to derive diagnostic labels
+- **Findings** → used as model input
 
-Task: Binary classification (Yes / No)
+Patient-level dataset splitting is also used to reduce leakage between training and evaluation data.
 
-Rationale:
-Used as a proxy for clinical notes due to access restrictions on full MIMIC-III data. This avoids paid training requirements while preserving academic validity.
+## System Architecture
 
-⚠️ Note:
-Image and text samples are not paired at the patient level. This project evaluates architectural multimodal fusion, not patient-level clinical inference.
+```text
+                    IU X-Ray Dataset
+                           |
+             +-------------+-------------+
+             |                           |
+        Chest X-Ray                 Radiology Report
+             |                           |
+             v                           v
+       DenseNet-121               BioClinicalBERT
+             |                           |
+             v                           v
+       Image Features              Text Features
+             |                           |
+             +-------------+-------------+
+                           |
+                    Fusion Engine
+                    /           \
+                   /             \
+        Concatenation         Gated Fusion
+                   \             /
+                    \           /
+                     v         v
+                    Prediction
+                        |
+                        v
+              Pneumonia / Normal
+                        |
+              +---------+---------+
+              |                   |
+           Grad-CAM          Token Occlusion
+              |                   |
+              v                   v
+       Image attribution     Text attribution
+```
 
-Project Structure
-multimodal-dx/
-│
-├── src/
-│ ├── datasets/ # Image, text, and multimodal datasets
-│ ├── models/ # Image encoder, text encoder, fusion models
-│ ├── training/ # Training & evaluation scripts
-│ ├── explainability/ # Grad-CAM implementation
-│
-├── reports/
-│ ├── figures/ # Grad-CAM visualisations
-│ ├── tables/ # Metrics and curated indexes
-│
-├── README.md
-└── requirements.txt
+## Models
 
-Models
-Image Model
+### Image Encoder
 
-Backbone: DenseNet-121 (ImageNet pretrained)
+A pretrained **DenseNet-121** model is used to extract visual representations from chest X-ray images.
 
-Input: Chest X-ray (224×224)
+DenseNet-121 was selected as a parameter-efficient CNN backbone with established relevance to chest X-ray classification.
 
-Output: Binary classification logits
+### Text Encoder
 
-Text Model
+**BioClinicalBERT** is used to encode radiology report text and capture clinical terminology, context and linguistic patterns.
 
-Encoder: Clinical BERT-style transformer
+### Fusion Strategies
 
-Input: Tokenised clinical text
+Two multimodal strategies are evaluated:
 
-Output: Binary classification logits
+#### 1. Concatenation Fusion
 
-Fusion Models
+Image and text feature vectors are directly combined before classification.
 
-Two fusion strategies are implemented:
+#### 2. Gated Fusion
 
-Concatenation Fusion
+A learnable gate dynamically weights the contribution of the image and text representations before classification.
 
-Attention-based Fusion
+The purpose is to allow the model to adjust its reliance on each modality rather than assuming that both sources are equally informative for every case.
 
-Fusion operates at the feature level, combining latent representations from image and text encoders.
+## Dataset and Data Handling
 
-Explainability
-Grad-CAM
+The project uses the publicly available **IU X-Ray dataset**, containing paired chest X-ray images and radiology reports.
 
-Applied to the image encoder
+The preprocessing pipeline was designed around three principles:
 
-Highlights spatial regions influencing predictions
+1. **Leakage safety** — diagnostic labels are derived from report impressions while model input is restricted to findings.
+2. **Reproducibility** — fixed seeds and deterministic data splitting are used.
+3. **Controlled preprocessing** — input canonicalisation, validation and file integrity checks are applied before training.
 
-Implemented with safe backward hooks (no in-place ops)
+The classification task is:
 
-Curated Explainability Set
+```text
+Pneumonia vs Normal
+```
 
-Grad-CAM visualisations are generated for:
+## Evaluation
 
-True Positives (TP)
+The system is evaluated using metrics designed to provide a more informative view of imbalanced medical classification:
 
-True Negatives (TN)
+- ROC-AUC
+- Balanced Accuracy
+- Matthews Correlation Coefficient (MCC)
+- Sensitivity
+- Specificity
 
-False Positives (FP)
+Models are evaluated across multiple random seeds to reduce dependence on a single favourable initialisation.
 
-False Negatives (FN)
+### Reported Results
 
-A CSV index maps:
+| Model                      |  Test AUC | Balanced Accuracy |
+| -------------------------- | --------: | ----------------: |
+| Image-only                 |    0.7127 |            0.6334 |
+| Text-only                  |    0.8579 |            0.7606 |
+| Early/Concatenation Fusion |     0.848 |             0.739 |
+| Gated Fusion               | **0.849** |         **0.760** |
 
-Sample index
+The gated fusion experiment produced a sensitivity of **0.727** in the reported single-seed evaluation, compared with **0.636** for early fusion.
 
-True label
+The multi-seed analysis further examined variation caused by random initialisation. The dissertation reports that gated fusion showed lower variance in MCC and more consistent sensitivity than early concatenation fusion.
 
-Predicted label
+## Explainability
 
-Prediction probability
+Explainability is treated as a core part of the system rather than an additional visualisation step.
 
-Output figure path
+### Grad-CAM
 
-📁 Outputs:
+Grad-CAM is used to generate heatmaps showing regions of the chest X-ray that contributed to the visual model's prediction.
 
-reports/figures/gradcam_curated/
-reports/tables/gradcam_curated_index.csv
+### Token Occlusion
 
-Training & Evaluation
-Image Model
-python -m src.training.train_image
+Individual tokens in the radiology report can be masked to measure their effect on the prediction score. This provides an indication of which textual information influenced the model.
 
-Text Model
-python -m src.training.train_text
+### Gate Analysis
 
-Multimodal Fusion
-python -m src.training.train_fusion
+The gated fusion mechanism records its learned weighting behaviour, allowing analysis of whether individual predictions rely more heavily on the image or text modality.
 
-Fusion training includes:
+## Reproducibility and Engineering
 
-ROC-AUC
+The implementation was designed as a software engineering artefact rather than a collection of experimental scripts.
 
-PR-AUC (important for class imbalance)
+Key engineering principles include:
 
-F1-score with validation-tuned threshold
+- Modular separation of data, encoders, fusion and prediction components
+- Fixed random seeds
+- Patient-level data splitting
+- Persistent experiment logging
+- Unit testing
+- Input validation
+- CPU-compatible training and inference
+- Decoupled fusion modules
+- Explicit handling of data quality and file integrity
 
-Confusion matrices
+## Technology Stack
 
-Explainability Execution
-Random Samples
-python -m src.training.run_gradcam
+| Area            | Technology                                 |
+| --------------- | ------------------------------------------ |
+| Language        | Python 3.8                                 |
+| Deep Learning   | PyTorch                                    |
+| Computer Vision | Torchvision, DenseNet-121                  |
+| Clinical NLP    | Hugging Face Transformers, BioClinicalBERT |
+| Evaluation      | Scikit-learn                               |
+| Data Processing | NumPy, Pandas                              |
+| Explainability  | Grad-CAM, token occlusion                  |
+| Testing         | Pytest                                     |
 
-Curated TP / TN / FP / FN
-python -m src.training.run_gradcam_curated
+## Key Findings
 
-Reproducibility
+The project found that:
 
-Fixed random seeds (PyTorch, NumPy, Python)
+- Multimodal fusion provided a substantial improvement over the image-only baseline.
+- Gated fusion achieved similar overall discrimination to early fusion while producing a different sensitivity/specificity trade-off.
+- Multi-seed evaluation was important for understanding robustness rather than relying on a single training run.
+- Clinical text was highly informative, highlighting both the value of multimodal context and the importance of preventing label leakage.
+- Explainability exposed clinically relevant failure modes involving label ambiguity and overlap between pneumonia and chronic lung disease.
+- Meaningful multimodal experimentation was possible using standard CPU hardware and frozen pretrained encoders.
 
-Deterministic dataset splits
+## Limitations
 
-Metrics saved to disk
+The system is a research prototype and has important limitations.
 
-Models checkpointed by best validation score
+- The IU X-Ray dataset does not represent the full diversity of clinical populations and imaging environments.
+- Radiology reports contain ambiguity and annotation noise.
+- CPU-only execution limited the amount of hyperparameter tuning and experimentation that could be performed.
+- Explainability methods such as Grad-CAM and token occlusion provide evidence about model behaviour but do not prove causal reasoning.
+- The system has not undergone prospective clinical validation.
+- The model should not be interpreted as a clinically deployable diagnostic system.
 
-Ethical & Practical Considerations
+## Future Work
 
-Uses public and demo datasets only
+Potential extensions include:
 
-No protected patient data
+- Evaluation on larger and more diverse datasets
+- External validation across institutions
+- More extensive hyperparameter optimisation
+- Investigation of additional multimodal fusion mechanisms
+- Improved handling of missing or noisy modalities
+- Calibration and uncertainty estimation
+- More systematic clinical validation of explanations
+- GPU-enabled experimentation for broader model comparisons
 
-Not intended for clinical use
+## Project Context
 
-Results reflect research exploration, not medical advice
+**MSc Artificial Intelligence — Kingston University**
 
-Limitations
+The project was completed as an MSc dissertation and combines:
 
-Image and text data are not patient-aligned
+- Deep learning
+- Computer vision
+- Clinical NLP
+- Multimodal learning
+- Experimental design
+- Explainable AI
+- Data leakage prevention
+- Software engineering
+- Robust evaluation
 
-Text dataset is a proxy for real clinical notes
+## Author
 
-Dataset sizes are intentionally constrained
+**Qasim Bilal Arshad**
 
-Performance prioritises analysis over optimisation
+MSc Artificial Intelligence, Kingston University  
+BSc Computer Science, University of Leicester
 
-Dependencies
-
-Install required packages:
-
-pip install -r requirements.txt
-
-Author
-
-Qasim Bilal Arshad
-Final-Year Project — Multimodal Machine Learning
+LinkedIn: www.linkedin.com/in/qasim-bilal-arshad

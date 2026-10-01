@@ -1,36 +1,3 @@
-"""
-Purpose
--------
-Loads clinical text samples for either:
-1) Binary classification (legacy PubMedQA proxy)
-2) Unlabeled radiology report encoding (IU X-ray reports)
-
-Dataset Format
--------------
-Mode A: classification
-- text: str
-- label: int (0/1)
-
-Mode B: radiology/unlabeled
-- text: str
-- uid: int (group id / study id)
-
-Outputs
--------
-__getitem__ returns a dict containing:
-- input_ids: torch.LongTensor [max_length]
-- attention_mask: torch.LongTensor [max_length]
-and either:
-- label: torch.LongTensor scalar              (classification)
-or
-- uid: torch.LongTensor scalar                (unlabeled)
-
-Notes
------
-- Tokenization uses a transformer tokenizer (e.g., Bio_ClinicalBERT).
-- For IU dataset, we typically train/fuse using paired alignment rather than disease labels.
-"""
-
 from dataclasses import dataclass
 from typing import Dict, Optional
 

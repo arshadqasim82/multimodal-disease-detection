@@ -1,11 +1,3 @@
-"""
-Generates a curated Grad-CAM set across TP/TN/FP/FN categories.
-
-Outputs
--------
-- reports/figures/gradcam_curated/*.png
-- reports/tables/gradcam_curated_index.csv
-"""
 
 from src.explainability.gradcam import GradCAM
 from src.models.image_encoder import DenseNetImageEncoder

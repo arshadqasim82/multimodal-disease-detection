@@ -1,10 +1,3 @@
-"""
-Generates Grad-CAM overlays for a small set of sample indices.
-
-Outputs
--------
-- reports/figures/gradcam/*.png
-"""
 
 from src.explainability.gradcam import GradCAM
 from src.models.image_encoder import DenseNetImageEncoder

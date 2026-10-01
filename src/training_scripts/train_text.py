@@ -1,28 +1,6 @@
-"""
-Trains an image-only DenseNet baseline on IU paired data using a match/mismatch objective.
-
-Task
-----
-Binary classification:
-- label=1: the (image, report) pair is a true pair (positive)
-- label=0: the report is randomly swapped (negative)
-
-Image-only baseline uses ONLY the image but keeps the same labels.
-This is a sanity baseline; it should be near chance since "matching" is not solvable from image alone.
-
-Outputs
--------
-- reports/image_model_best.pt
-- reports/image_metrics.txt
-
-Evaluation
-----------
-- uid-based train/val/test split (avoid leakage across views)
-- ROC-AUC and F1 with confusion matrix
-"""
 
 from src.datasets.multimodal_dataset import MultimodalDatasetConfig, PairedCSVMatchDataset
-from src.models.image_encoder import DenseNetImageEncoder
+from src.models.text_encoder import ClinicalBertClassifier
 from pathlib import Path
 import sys
 import random
@@ -64,10 +42,11 @@ def evaluate(model, loader, device, threshold=0.5):
     model.eval()
     probs, labels = [], []
     for batch in loader:
-        x = batch["image"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
         y = batch["label"].cpu().numpy()
 
-        logits = model(x)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask)
         p = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
 
         probs.extend(p)
@@ -100,13 +79,14 @@ def main():
     set_seed(seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_name = "emilyalsentzer/Bio_ClinicalBERT"
+
     paired_csv = "/content/multimodal-dx/IU_DIR/iu_dataset.csv"
 
     cfg = MultimodalDatasetConfig(
         paired_csv=paired_csv,
-        # unused here, required by config
-        tokenizer_name="emilyalsentzer/Bio_ClinicalBERT",
-        max_length=192,  # unused here
+        tokenizer_name=model_name,
+        max_length=192,
         image_size=224,
         neg_prob=0.5,
     )
@@ -114,34 +94,34 @@ def main():
     train_idx, val_idx, test_idx = build_uid_split_indices(
         paired_csv, seed=seed)
 
-    # Reuse PairedCSVMatchDataset but only consume image + label
     train_ds = PairedCSVMatchDataset(cfg, indices=train_idx, seed=42)
     val_ds = PairedCSVMatchDataset(cfg, indices=val_idx, seed=123)
     test_ds = PairedCSVMatchDataset(cfg, indices=test_idx, seed=999)
 
-    train_loader = DataLoader(train_ds, batch_size=16,
+    train_loader = DataLoader(train_ds, batch_size=8,
                               shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=16,
-                            shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_ds, batch_size=16,
+    val_loader = DataLoader(val_ds, batch_size=8, shuffle=False, num_workers=2)
+    test_loader = DataLoader(test_ds, batch_size=8,
                              shuffle=False, num_workers=2)
 
-    model = DenseNetImageEncoder(num_classes=2).to(device)
+    model = ClinicalBertClassifier(model_name=model_name).to(device)
+
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
     best_val_auc = -1.0
-    best_path = "reports/image_model_best.pt"
+    best_path = "reports/text_model_best.pt"
     Path("reports").mkdir(exist_ok=True)
 
     for epoch in range(5):
         model.train()
-        for batch in tqdm(train_loader, desc=f"Image Epoch {epoch+1}/5"):
-            x = batch["image"].to(device)
+        for batch in tqdm(train_loader, desc=f"Text Epoch {epoch+1}/5"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             y = batch["label"].to(device)
 
             optimizer.zero_grad()
-            logits = model(x)
+            logits = model(input_ids=input_ids, attention_mask=attention_mask)
             loss = criterion(logits, y)
             loss.backward()
             optimizer.step()
@@ -159,7 +139,7 @@ def main():
         if val_auc2 > best_val_auc:
             best_val_auc = val_auc2
             torch.save(model.state_dict(), best_path)
-            print("✅ Saved new best image model")
+            print("✅ Saved new best text model")
 
     model.load_state_dict(torch.load(best_path, map_location=device))
     _, _, _, y_val, p_val = evaluate(model, val_loader, device, threshold=0.5)
@@ -172,7 +152,7 @@ def main():
     print(f"TEST AUC: {test_auc:.4f} | TEST F1@t={t_best:.2f}: {test_f1:.4f}")
     print("TEST Confusion Matrix:\n", test_cm)
 
-    with open("reports/image_metrics.txt", "w") as f:
+    with open("reports/text_metrics.txt", "w") as f:
         f.write(f"PAIRED_CSV={paired_csv}\n")
         f.write(f"NEG_PROB={cfg.neg_prob}\n")
         f.write(f"VAL_BEST_AUC={best_val_auc:.4f}\n")
@@ -181,7 +161,7 @@ def main():
         f.write(f"TEST_F1={test_f1:.4f}\n")
         f.write(f"TEST_CM=\n{test_cm}\n")
 
-    print("Saved metrics to reports/image_metrics.txt")
+    print("Saved metrics to reports/text_metrics.txt")
 
 
 if __name__ == "__main__":

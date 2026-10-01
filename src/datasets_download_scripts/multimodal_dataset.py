@@ -1,35 +1,3 @@
-"""
-Purpose
--------
-Defines a multimodal dataset that returns aligned image + text inputs
-from a single paired CSV (e.g., IU Chest X-Rays), with a binary matching task.
-
-Task
-----
-Binary matching:
-  label=1 -> (image, its own report text)
-  label=0 -> (image, a random other report text)
-
-This keeps your existing fusion training loop and ROC-AUC/F1 evaluation valid.
-
-CSV Format
-----------
-Requires:
-- image_path: str
-- text: str
-Optional:
-- uid: int (used for leakage-safe splitting outside this dataset)
-
-Outputs
--------
-Returns dict:
-- image: tensor [3, H, W]
-- input_ids: tensor [L]
-- attention_mask: tensor [L]
-- label: scalar long (0/1)
-- uid: scalar long (if available)
-"""
-
 from dataclasses import dataclass
 from typing import Dict, Optional
 
